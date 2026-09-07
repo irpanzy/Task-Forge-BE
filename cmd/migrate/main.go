@@ -28,7 +28,6 @@ func main() {
 	cmd := exec.Command("migrate", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
 
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("Eksekusi migrate gagal: %v", err)

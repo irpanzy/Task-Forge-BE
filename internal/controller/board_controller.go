@@ -17,6 +17,10 @@ type BoardController interface {
 	GetBoardByID(c *fiber.Ctx) error
 	UpdateBoard(c *fiber.Ctx) error
 	DeleteBoard(c *fiber.Ctx) error
+
+	AddMembers(c *fiber.Ctx) error
+	GetMembers(c *fiber.Ctx) error
+	DeleteMember(c *fiber.Ctx) error
 }
 
 type boardController struct {
@@ -146,4 +150,82 @@ func (ctrl *boardController) DeleteBoard(c *fiber.Ctx) error {
 	}
 
 	return response.Success(c, fiber.StatusOK, "Board deleted successfully", nil)
+}
+
+// AddMembers adds users as members to a board (Body: ["uuid1", "uuid2"])
+func (ctrl *boardController) AddMembers(c *fiber.Ctx) error {
+	boardPublicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid board ID format", nil)
+	}
+
+	userPublicIDStr, _ := c.Locals("public_id").(string)
+	userPublicID, _ := uuid.Parse(userPublicIDStr)
+	userRole, _ := c.Locals("role").(string)
+
+	var memberIDs []string
+	if err := c.BodyParser(&memberIDs); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid JSON format: expected array of user IDs", err.Error())
+	}
+
+	if len(memberIDs) == 0 {
+		return response.Error(c, fiber.StatusBadRequest, "At least one member ID is required", nil)
+	}
+
+	if err := ctrl.boardService.AddMembers(boardPublicID, userPublicID, userRole, memberIDs); err != nil {
+		if strings.Contains(err.Error(), "access denied") {
+			return response.Error(c, fiber.StatusForbidden, err.Error(), nil)
+		}
+		return response.Error(c, fiber.StatusBadRequest, err.Error(), nil)
+	}
+
+	return response.Success(c, fiber.StatusOK, "Members added successfully", nil)
+}
+
+// GetMembers retrieves all members of a board
+func (ctrl *boardController) GetMembers(c *fiber.Ctx) error {
+	boardPublicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid board ID format", nil)
+	}
+
+	userPublicIDStr, _ := c.Locals("public_id").(string)
+	userPublicID, _ := uuid.Parse(userPublicIDStr)
+	userRole, _ := c.Locals("role").(string)
+
+	members, err := ctrl.boardService.GetMembers(boardPublicID, userPublicID, userRole)
+	if err != nil {
+		if strings.Contains(err.Error(), "access denied") {
+			return response.Error(c, fiber.StatusForbidden, err.Error(), nil)
+		}
+		return response.Error(c, fiber.StatusNotFound, err.Error(), nil)
+	}
+
+	return response.Success(c, fiber.StatusOK, "Members retrieved successfully", members)
+}
+
+// DeleteMember removes a member from a board
+func (ctrl *boardController) DeleteMember(c *fiber.Ctx) error {
+	boardPublicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid board ID format", nil)
+	}
+
+	targetMemberPublicID, err := uuid.Parse(c.Params("userId"))
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Invalid member user ID format", nil)
+	}
+
+	userPublicIDStr, _ := c.Locals("public_id").(string)
+	userPublicID, _ := uuid.Parse(userPublicIDStr)
+	userRole, _ := c.Locals("role").(string)
+
+	if err := ctrl.boardService.RemoveMember(boardPublicID, userPublicID, targetMemberPublicID, userRole); err != nil {
+		if strings.Contains(err.Error(), "access denied") {
+			return response.Error(c, fiber.StatusForbidden, err.Error(), nil)
+		}
+		return response.Error(c, fiber.StatusBadRequest, err.Error(), nil)
+	}
+
+	return response.Success(c, fiber.StatusOK, "Member removed successfully", nil)
 }

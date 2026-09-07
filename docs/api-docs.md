@@ -476,10 +476,13 @@ Overview table for board endpoints:
 | Method | Endpoint | Access / Guard | Parameters | Request Body | Success Status | Description |
 | :---: | :--- | :---: | :--- | :---: | :---: | :--- |
 | `POST` | `/api/boards` | Authenticated | - | `{ title, description?, due_date? }` | `201` | Create a new board |
-| `GET` | `/api/boards` | Authenticated | Query: `?page=1&limit=10&search=...` | - | `200` | List user's boards with pagination and search |
-| `GET` | `/api/boards/:id` | Owner / Admin | Path: `:id` (UUID) | - | `200` | Retrieve board detail by UUID |
+| `GET` | `/api/boards` | Authenticated | Query: `?page=1&limit=10&search=...` | - | `200` | List user's boards (owned & member) |
+| `GET` | `/api/boards/:id` | Owner / Member / Admin | Path: `:id` (UUID) | - | `200` | Retrieve board detail by UUID (with members) |
 | `PUT` | `/api/boards/:id` | Owner / Admin | Path: `:id` (UUID) | `{ title?, description?, due_date? }` | `200` | Update board details |
 | `DELETE` | `/api/boards/:id` | Owner / Admin | Path: `:id` (UUID) | - | `200` | Delete board |
+| `POST` | `/api/boards/:id/members` | Owner / Admin | Path: `:id` (UUID) | `["user_uuid1", "user_uuid2"]` | `200` | Add members to board |
+| `GET` | `/api/boards/:id/members` | Owner / Member / Admin | Path: `:id` (UUID) | - | `200` | List all members of a board |
+| `DELETE` | `/api/boards/:id/members/:userId` | Owner / Self / Admin | Path: `:id`, `:userId` (UUID) | - | `200` | Remove member from board |
 
 ---
 
@@ -664,6 +667,92 @@ Deletes a board from the system (Soft Delete).
 
 ---
 
+#### 6. Add Board Members
+Adds one or multiple users to the board as members.
+
+- **Method**: `POST`
+- **URL**: `/api/boards/:id/members`
+- **Access**: Board Owner or **`admin`**
+- **Headers**:
+  - `Content-Type: application/json`
+  - `X-CSRF-Token: <token>`
+- **Path Parameters**:
+  - `id`: Target board UUID
+
+**Request Body:**
+Array of user public UUIDs to add:
+```json
+[
+  "2255affe-8ed3-446a-9efc-978de63d085e",
+  "75a25a74-493c-4d51-93ca-9f2c6a14fed8"
+]
+```
+
+**Success Response (200 OK):**
+```json
+{
+  "status": "success",
+  "code": 200,
+  "message": "Members added successfully",
+  "data": null
+}
+```
+
+---
+
+#### 7. Get Board Members
+Retrieves all members belonging to a board.
+
+- **Method**: `GET`
+- **URL**: `/api/boards/:id/members`
+- **Access**: Board Owner, Member, or **`admin`**
+- **Path Parameters**:
+  - `id`: Target board UUID
+
+**Success Response (200 OK):**
+```json
+{
+  "status": "success",
+  "code": 200,
+  "message": "Members retrieved successfully",
+  "data": [
+    {
+      "public_id": "2255affe-8ed3-446a-9efc-978de63d085e",
+      "name": "Budi Santoso",
+      "email": "budi@example.com",
+      "role": "user",
+      "joined_at": "2026-09-07T22:30:00Z"
+    }
+  ]
+}
+```
+
+---
+
+#### 8. Delete Board Member
+Removes a member from a board (or member leaving a board).
+
+- **Method**: `DELETE`
+- **URL**: `/api/boards/:id/members/:userId`
+- **Access**: Board Owner, the member themselves, or **`admin`**
+- **Headers**:
+  - `X-CSRF-Token: <token>`
+- **Path Parameters**:
+  - `id`: Target board UUID
+  - `userId`: Target member user UUID
+
+**Success Response (200 OK):**
+```json
+{
+  "status": "success",
+  "code": 200,
+  "message": "Member removed successfully",
+  "data": null
+}
+```
+
+---
+
 ## 4. Role-Based Access Control (RBAC) Matrix
 
 | Endpoint | Public | Role `user` | Role `admin` |
@@ -679,8 +768,12 @@ Deletes a board from the system (Soft Delete).
 | `PUT /api/users/:id` | ❌ | ✅ *(own account only)* | ✅ *(all accounts)* |
 | `DELETE /api/users/:id` | ❌ | ❌ | ✅ *(except self)* |
 | `POST /api/boards` | ❌ | ✅ | ✅ |
-| `GET /api/boards` | ❌ | ✅ *(own boards)* | ✅ *(own boards)* |
-| `GET /api/boards/:id` | ❌ | ✅ *(own board only)* | ✅ *(all boards)* |
-| `PUT /api/boards/:id` | ❌ | ✅ *(own board only)* | ✅ *(all boards)* |
-| `DELETE /api/boards/:id` | ❌ | ✅ *(own board only)* | ✅ *(all boards)* |
+| `GET /api/boards` | ❌ | ✅ *(my boards: owned & member)* | ✅ *(my boards: owned & member)* |
+| `GET /api/boards/:id` | ❌ | ✅ *(owner & members)* | ✅ *(all boards)* |
+| `PUT /api/boards/:id` | ❌ | ✅ *(owner only)* | ✅ *(all boards)* |
+| `DELETE /api/boards/:id` | ❌ | ✅ *(owner only)* | ✅ *(all boards)* |
+| `POST /api/boards/:id/members` | ❌ | ✅ *(owner only)* | ✅ *(all boards)* |
+| `GET /api/boards/:id/members` | ❌ | ✅ *(owner & members)* | ✅ *(all boards)* |
+| `DELETE /api/boards/:id/members/:userId` | ❌ | ✅ *(owner & self)* | ✅ *(all boards)* |
+
 

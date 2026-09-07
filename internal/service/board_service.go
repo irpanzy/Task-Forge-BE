@@ -14,21 +14,31 @@ import (
 
 type BoardService interface {
 	CreateBoard(ownerPublicID uuid.UUID, req *dto.CreateBoardRequest) (*dto.BoardResponse, error)
-	GetUserBoards(ownerPublicID uuid.UUID, search string, page, limit int) (*dto.PaginatedBoardsResponse, error)
+	GetUserBoards(userPublicID uuid.UUID, search string, page, limit int) (*dto.PaginatedBoardsResponse, error)
 	GetBoardDetail(boardPublicID, userPublicID uuid.UUID, userRole string) (*dto.BoardResponse, error)
 	UpdateBoard(boardPublicID, userPublicID uuid.UUID, userRole string, req *dto.UpdateBoardRequest) (*dto.BoardResponse, error)
 	DeleteBoard(boardPublicID, userPublicID uuid.UUID, userRole string) error
+
+	AddMembers(boardPublicID, userPublicID uuid.UUID, userRole string, memberPublicIDs []string) error
+	GetMembers(boardPublicID, userPublicID uuid.UUID, userRole string) ([]dto.MemberResponse, error)
+	RemoveMember(boardPublicID, userPublicID, targetMemberPublicID uuid.UUID, userRole string) error
 }
 
 type boardService struct {
-	boardRepo repository.BoardRepository
-	userRepo  repository.UserRepository
+	boardRepo       repository.BoardRepository
+	boardMemberRepo repository.BoardMemberRepository
+	userRepo        repository.UserRepository
 }
 
-func NewBoardService(boardRepo repository.BoardRepository, userRepo repository.UserRepository) BoardService {
+func NewBoardService(
+	boardRepo repository.BoardRepository,
+	boardMemberRepo repository.BoardMemberRepository,
+	userRepo repository.UserRepository,
+) BoardService {
 	return &boardService{
-		boardRepo: boardRepo,
-		userRepo:  userRepo,
+		boardRepo:       boardRepo,
+		boardMemberRepo: boardMemberRepo,
+		userRepo:        userRepo,
 	}
 }
 
@@ -59,10 +69,11 @@ func (s *boardService) CreateBoard(ownerPublicID uuid.UUID, req *dto.CreateBoard
 	}
 
 	res := dto.ToBoardResponse(&newBoard)
+	res.IsOwner = true
 	return &res, nil
 }
 
-func (s *boardService) GetUserBoards(ownerPublicID uuid.UUID, search string, page, limit int) (*dto.PaginatedBoardsResponse, error) {
+func (s *boardService) GetUserBoards(userPublicID uuid.UUID, search string, page, limit int) (*dto.PaginatedBoardsResponse, error) {
 	if page <= 0 {
 		page = 1
 	}
@@ -70,16 +81,28 @@ func (s *boardService) GetUserBoards(ownerPublicID uuid.UUID, search string, pag
 		limit = 10
 	}
 
+	user, err := s.userRepo.FindByPublicID(userPublicID)
+	if err != nil {
+		return nil, err
+	}
+
+	memberBoardIDs, err := s.boardMemberRepo.FindMemberBoardIDs(user.InternalID)
+	if err != nil {
+		return nil, err
+	}
+
 	offset := (page - 1) * limit
 
-	boards, totalData, err := s.boardRepo.FindAllByOwner(ownerPublicID, search, offset, limit)
+	boards, totalData, err := s.boardRepo.FindUserBoards(userPublicID, memberBoardIDs, search, offset, limit)
 	if err != nil {
 		return nil, err
 	}
 
 	var boardResponses []dto.BoardResponse
 	for _, b := range boards {
-		boardResponses = append(boardResponses, dto.ToBoardResponse(&b))
+		res := dto.ToBoardResponse(&b)
+		res.IsOwner = (b.OwnerPublicID == userPublicID)
+		boardResponses = append(boardResponses, res)
 	}
 
 	totalPages := int(math.Ceil(float64(totalData) / float64(limit)))
@@ -102,12 +125,34 @@ func (s *boardService) GetBoardDetail(boardPublicID, userPublicID uuid.UUID, use
 		return nil, err
 	}
 
-	// Authorization check: non-admin can only access boards they own
-	if !strings.EqualFold(userRole, "admin") && board.OwnerPublicID != userPublicID {
-		return nil, errors.New("access denied: you do not have permission to view this board")
+	user, err := s.userRepo.FindByPublicID(userPublicID)
+	if err != nil {
+		return nil, err
+	}
+
+	isOwner := (board.OwnerPublicID == userPublicID)
+	isAdmin := strings.EqualFold(userRole, "admin")
+
+	isMember := false
+	if !isOwner && !isAdmin {
+		isMember, err = s.boardMemberRepo.IsMember(board.InternalID, user.InternalID)
+		if err != nil {
+			return nil, err
+		}
+		if !isMember {
+			return nil, errors.New("access denied: you do not have permission to view this board")
+		}
+	}
+
+	members, err := s.boardMemberRepo.GetMembers(board.InternalID)
+	if err != nil {
+		return nil, err
 	}
 
 	res := dto.ToBoardResponse(board)
+	res.IsOwner = isOwner
+	res.Members = members
+
 	return &res, nil
 }
 
@@ -140,6 +185,7 @@ func (s *boardService) UpdateBoard(boardPublicID, userPublicID uuid.UUID, userRo
 	}
 
 	res := dto.ToBoardResponse(board)
+	res.IsOwner = (board.OwnerPublicID == userPublicID)
 	return &res, nil
 }
 
@@ -158,4 +204,109 @@ func (s *boardService) DeleteBoard(boardPublicID, userPublicID uuid.UUID, userRo
 	}
 
 	return s.boardRepo.Delete(boardPublicID)
+}
+
+func (s *boardService) AddMembers(boardPublicID, userPublicID uuid.UUID, userRole string, memberPublicIDs []string) error {
+	board, err := s.boardRepo.FindByPublicID(boardPublicID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("board not found")
+		}
+		return err
+	}
+
+	// Only owner or admin can add members
+	if !strings.EqualFold(userRole, "admin") && board.OwnerPublicID != userPublicID {
+		return errors.New("access denied: only the board owner can add members")
+	}
+
+	var userInternalIDs []int64
+	for _, idStr := range memberPublicIDs {
+		targetUUID, err := uuid.Parse(strings.TrimSpace(idStr))
+		if err != nil {
+			continue // skip invalid UUID strings
+		}
+
+		// Skip if target is the owner
+		if targetUUID == board.OwnerPublicID {
+			continue
+		}
+
+		targetUser, err := s.userRepo.FindByPublicID(targetUUID)
+		if err != nil {
+			continue // skip if user doesn't exist
+		}
+
+		userInternalIDs = append(userInternalIDs, targetUser.InternalID)
+	}
+
+	if len(userInternalIDs) == 0 {
+		return errors.New("no valid members to add")
+	}
+
+	return s.boardMemberRepo.AddMembers(board.InternalID, userInternalIDs)
+}
+
+func (s *boardService) GetMembers(boardPublicID, userPublicID uuid.UUID, userRole string) ([]dto.MemberResponse, error) {
+	board, err := s.boardRepo.FindByPublicID(boardPublicID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("board not found")
+		}
+		return nil, err
+	}
+
+	user, err := s.userRepo.FindByPublicID(userPublicID)
+	if err != nil {
+		return nil, err
+	}
+
+	isOwner := (board.OwnerPublicID == userPublicID)
+	isAdmin := strings.EqualFold(userRole, "admin")
+
+	if !isOwner && !isAdmin {
+		isMember, err := s.boardMemberRepo.IsMember(board.InternalID, user.InternalID)
+		if err != nil {
+			return nil, err
+		}
+		if !isMember {
+			return nil, errors.New("access denied: you do not have permission to view members of this board")
+		}
+	}
+
+	return s.boardMemberRepo.GetMembers(board.InternalID)
+}
+
+func (s *boardService) RemoveMember(boardPublicID, userPublicID, targetMemberPublicID uuid.UUID, userRole string) error {
+	board, err := s.boardRepo.FindByPublicID(boardPublicID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("board not found")
+		}
+		return err
+	}
+
+	// Owner cannot be removed as a member
+	if targetMemberPublicID == board.OwnerPublicID {
+		return errors.New("cannot remove the board owner")
+	}
+
+	isOwner := (board.OwnerPublicID == userPublicID)
+	isAdmin := strings.EqualFold(userRole, "admin")
+	isSelf := (userPublicID == targetMemberPublicID)
+
+	// Only owner, admin, or the member themselves (leaving) can remove a member
+	if !isOwner && !isAdmin && !isSelf {
+		return errors.New("access denied: you do not have permission to remove this member")
+	}
+
+	targetUser, err := s.userRepo.FindByPublicID(targetMemberPublicID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("member user not found")
+		}
+		return err
+	}
+
+	return s.boardMemberRepo.RemoveMember(board.InternalID, targetUser.InternalID)
 }
